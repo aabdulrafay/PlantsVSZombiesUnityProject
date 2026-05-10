@@ -33,6 +33,8 @@ public struct Wave
 
 public class GameController : MonoBehaviour
 {
+    [SerializeField] private string defaultNextStage = "MainScene";
+
     public GameObject zombie1;
     private GameModel model;
     public AudioClip readySound;
@@ -319,7 +321,12 @@ public class GameController : MonoBehaviour
 
     void GotoNextStage()
     {
-        SceneManager.LoadScene(nextStage);
+        string targetScene = string.IsNullOrWhiteSpace(nextStage) ? defaultNextStage : nextStage;
+        if (!Application.CanStreamedLevelBeLoaded(targetScene))
+        {
+            targetScene = defaultNextStage;
+        }
+        SceneManager.LoadScene(targetScene);
     }
 
     void RestartStage()
