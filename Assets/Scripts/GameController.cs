@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 using Random = UnityEngine.Random;
 
 public enum ZombieType
@@ -52,7 +53,11 @@ public class GameController : MonoBehaviour
     public GameObject sunLabel;
     public GameObject shovelBG;
     public GameObject BtnSubmitObj;
-    public GameObject BtnResetObj;
+    
+    public GameObject resultBannerObj;
+    public Sprite winSprite;
+    public Sprite loseSprite;
+    public bool skipCardSelectionUI = false;
 
     public float readyTime;
     public float elapsedTime;
@@ -60,16 +65,25 @@ public class GameController : MonoBehaviour
     public float sunInterval;
     public Wave[] waves;
     public int initSun;
+    public int minTotalZombies = 15; // Total zombies across all waves (3 waves x 5 = 15)
+    public float spawnInterval = 15f; // seconds between individual zombie spawns (INCREASED FOR MORE GAP)
+    public float gapBetweenWaves = 10f; // gap after each wave finishes (INCREASED FOR MORE GAP)
     private bool isLostGame = false;
+    private bool hasStartedGameplay = false;
 
     void Awake()
     {
         model = GameModel.GetInstance();
+        HideResultBanner();
     }
 
 	// Use this for initialization
 	void Start ()
 	{
+    // Prevent accidental simultaneous spawning from zero/negative inspector values.
+    if (spawnInterval < 0.1f) spawnInterval = 0.1f;
+    if (gapBetweenWaves < 0f) gapBetweenWaves = 0f;
+
         model.Clear();
 	    model.sun = initSun;
         ArrayList flags = new ArrayList();
@@ -80,13 +94,47 @@ public class GameController : MonoBehaviour
 	            flags.Add(waves[i].percentage);
 	        }
 	    }
-	    progressBar.GetComponent<ProgressBar>().InitWithFlag((float[])flags.ToArray(typeof(float)));
-        progressBar.SetActive(false);
-        cardDialog.SetActive(false);
-        sunLabel.SetActive(false);
-        shovelBG.SetActive(false);
-        BtnResetObj.SetActive(false);
-        BtnSubmitObj.SetActive(false);
+        // Ensure there will be at least minTotalZombies across all waves
+        int totalPlanned = 0;
+        for (int i = 0; i < waves.Length; i++)
+        {
+            if (waves[i].zombieData != null)
+            {
+                for (int j = 0; j < waves[i].zombieData.Length; j++)
+                {
+                    totalPlanned += (int)waves[i].zombieData[j].count;
+                }
+            }
+        }
+        if (totalPlanned < minTotalZombies && waves.Length > 0)
+        {
+            int need = minTotalZombies - totalPlanned;
+            int last = waves.Length - 1;
+            if (waves[last].zombieData == null || waves[last].zombieData.Length == 0)
+            {
+                Wave.Data d = new Wave.Data();
+                d.zombieType = ZombieType.Zombie1;
+                d.count = (uint)need;
+                waves[last].zombieData = new Wave.Data[1] { d };
+            }
+            else
+            {
+                // add to first entry of last wave
+                var arr = waves[last].zombieData;
+                arr[0].count = arr[0].count + (uint)need;
+                waves[last].zombieData = arr;
+            }
+            Debug.Log("GameController: increased zombies by " + need + " to meet minTotalZombies=" + minTotalZombies);
+        }
+        if (progressBar != null)
+        {
+            progressBar.GetComponent<ProgressBar>().InitWithFlag((float[])flags.ToArray(typeof(float)));
+            progressBar.SetActive(false);
+        }
+        if (cardDialog != null) cardDialog.SetActive(false);
+        if (sunLabel != null) sunLabel.SetActive(false);
+        if (shovelBG != null) shovelBG.SetActive(false);
+        if (BtnSubmitObj != null) BtnSubmitObj.SetActive(false);
 	    GetComponent<HandlerForShovel>().enabled = false;
 	    GetComponent<HandlerForPlants>().enabled = false;
 	    StartCoroutine(GameReady());
@@ -120,9 +168,14 @@ public class GameController : MonoBehaviour
 
     public void AfterSelectedCard()
     {
-        BtnResetObj.SetActive(false);
-        BtnSubmitObj.SetActive(false);
-        Destroy(cardDialog);
+        if (hasStartedGameplay)
+        {
+            return;
+        }
+        hasStartedGameplay = true;
+        
+        if (BtnSubmitObj != null) BtnSubmitObj.SetActive(false);
+        if (cardDialog != null) Destroy(cardDialog);
         GetComponent<HandlerForShovel>().enabled = true;
         GetComponent<HandlerForPlants>().enabled = true;
         Camera.main.transform.position = new Vector3(1.1f,0,-1);
@@ -140,11 +193,13 @@ public class GameController : MonoBehaviour
         move.time = 1;
         move.Begin();
         yield return new WaitForSeconds(1.5f);
-        sunLabel.SetActive(true);
-        shovelBG.SetActive(true);
-        cardDialog.SetActive(true);
-        BtnResetObj.SetActive(true);
-        BtnSubmitObj.SetActive(true);
+        if (sunLabel != null) sunLabel.SetActive(true);
+        if (shovelBG != null) shovelBG.SetActive(true);
+
+        if (!skipCardSelectionUI)
+        {
+            if (cardDialog != null) cardDialog.SetActive(true);
+        }
     }
 
     void Update()
@@ -190,10 +245,11 @@ public class GameController : MonoBehaviour
             }
             if (i + 1 == waves.Length)
             {
-                gameLabel.GetComponent<GameTips>().ShowFinalTip();
                 AudioManager.GetInstance().PlaySound(finalWaveSound);
             }
-            CreateZombies(ref waves[i]);
+            yield return StartCoroutine(CreateZombies(waves[i]));
+            if (gapBetweenWaves > 0f)
+                yield return new WaitForSeconds(gapBetweenWaves);
         }
         yield return StartCoroutine(WaitForZombieClear());
         yield return new WaitForSeconds(2);
@@ -255,14 +311,30 @@ public class GameController : MonoBehaviour
         StartCoroutine(UpdateProgress());
     }
 
-    void CreateZombies(ref Wave wave)
+    // Start spawning zombies over time for the given wave and wait until finished
+    IEnumerator CreateZombies(Wave wave)
     {
+        yield return StartCoroutine(CreateZombiesCoroutine(wave));
+    }
+
+    IEnumerator CreateZombiesCoroutine(Wave wave)
+    {
+        if (wave.zombieData == null)
+            yield break;
+
+        float interval = Mathf.Max(0.1f, spawnInterval);
+
         foreach (Wave.Data data in wave.zombieData)
         {
             for (int i = 0; i < data.count; i++)
             {
                 CreateOneZombie(data.zombieType);
+                if (i < data.count - 1)
+                    yield return new WaitForSeconds(interval);
             }
+
+            // Keep spacing between different zombie types in the same wave too.
+            yield return new WaitForSeconds(interval);
         }
     }
     
@@ -309,14 +381,85 @@ public class GameController : MonoBehaviour
         GetComponent<HandlerForPlants>().enabled = false;
         CancelInvoke("ProduceSun");
         AudioManager.GetInstance().PlayMusic(lostMusic, false);
-        Invoke("RestartStage", 8);
+        // Show lose sprite for 4 seconds then go to main scene
+        StartCoroutine(ShowResultThenGotoMain(loseSprite, 4f));
     }
 
     void WinGame()
     {
         CancelInvoke("ProduceSun");
         AudioManager.GetInstance().PlayMusic(winMusic, false);
-        Invoke("GotoNextStage", 3);
+        // Show win sprite for 4 seconds then go to main scene
+        StartCoroutine(ShowResultThenGotoMain(winSprite, 4f));
+    }
+
+    IEnumerator ShowResultThenGotoMain(Sprite sprite, float seconds)
+    {
+        GameObject temp = null;
+        if (sprite != null)
+        {
+            // Create a Screen Space - Overlay Canvas so the image is always on top
+            temp = new GameObject("_ResultOverlay_Canvas");
+            var canvas = temp.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            temp.AddComponent<CanvasScaler>();
+            temp.AddComponent<GraphicRaycaster>();
+
+            GameObject imgGO = new GameObject("_ResultOverlay_Image");
+            imgGO.transform.SetParent(temp.transform, false);
+            var img = imgGO.AddComponent<Image>();
+            img.sprite = sprite;
+            img.preserveAspect = true;
+
+            // Stretch to full screen while preserving aspect
+            var rt = imgGO.GetComponent<RectTransform>();
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.offsetMin = Vector2.zero;
+            rt.offsetMax = Vector2.zero;
+            rt.localScale = Vector3.one;
+        }
+
+        yield return new WaitForSeconds(seconds);
+
+        if (temp != null)
+            Destroy(temp);
+
+        // Always go back to the default main scene
+        string target = string.IsNullOrWhiteSpace(defaultNextStage) ? "MainScene" : defaultNextStage;
+        if (!Application.CanStreamedLevelBeLoaded(target)) target = "MainScene";
+        SceneManager.LoadScene(target);
+    }
+
+    void ShowResultBanner(Sprite sprite)
+    {
+        if (resultBannerObj == null || sprite == null)
+        {
+            return;
+        }
+
+        var spriteRenderer = resultBannerObj.GetComponent<SpriteRenderer>();
+        if (spriteRenderer != null)
+        {
+            spriteRenderer.sprite = sprite;
+            resultBannerObj.SetActive(true);
+            return;
+        }
+
+        var image = resultBannerObj.GetComponent<Image>();
+        if (image != null)
+        {
+            image.sprite = sprite;
+            resultBannerObj.SetActive(true);
+        }
+    }
+
+    void HideResultBanner()
+    {
+        if (resultBannerObj != null)
+        {
+            resultBannerObj.SetActive(false);
+        }
     }
 
     void GotoNextStage()

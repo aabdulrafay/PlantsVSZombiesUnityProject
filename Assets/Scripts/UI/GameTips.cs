@@ -7,7 +7,6 @@ public class GameTips : MonoBehaviour {
 	public Sprite[] startLabels = new Sprite[3];
     public Sprite approachingLabel;
     public Sprite lostLabel;
-    public Sprite finalLabel;
     
     private new SpriteRenderer renderer;
 
@@ -37,13 +36,6 @@ public class GameTips : MonoBehaviour {
     public void ShowApproachingTip()
     {
         StartCoroutine(DoShowLabel(approachingLabel, 3));
-    }
-
-    public void ShowFinalTip()
-    {
-        //renderer.enabled = true;
-        //renderer.sprite = finalLabel;
-        StartCoroutine(DoShowLabel(finalLabel, 3));
     }
 
     public void ShowLostTip()
